@@ -2,7 +2,7 @@
 #include <vector>
 #include <pthread.h>
 #include <unistd.h>
-#include <ctime>
+#include <sys/time.h>
 #include "hw2_output.h"
 using namespace std;
 
@@ -15,6 +15,8 @@ public:
     int rowSpan;
     int colSpan;
     struct timespec gatherTime;
+    unsigned int gatherTimeus;
+    struct timespec dummy;
     int numAreas;
     vector<pair<int, int>*> areas;
     ProperPrivate(int gid, int rowSpan, int colSpan, long gatherTime, int numAreas)
@@ -24,7 +26,8 @@ public:
         numAreas(numAreas) 
     {
         this->gatherTime.tv_sec = 0;
-        this->gatherTime.tv_nsec = (gatherTime % 1000) * 1000000;
+        this->gatherTime.tv_nsec = gatherTime * 1000000;
+        this->gatherTimeus = gatherTime * 1000;
     }
 
     ~ProperPrivate() {
@@ -42,7 +45,7 @@ public:
         for (int i = area.first; i < area.first + rowSpan; i++) {
             for (int j = area.second; j < area.second + colSpan; j++) {
                 while (grid[i][j].first) {   
-                    nanosleep(&gatherTime, nullptr);
+                    usleep(gatherTimeus);
                     grid[i][j].first--;
                     hw2_notify(PROPER_PRIVATE_GATHERED, gid, i, j);
                 }
@@ -52,6 +55,16 @@ public:
         hw2_notify(PROPER_PRIVATE_CLEARED, gid, 0, 0);
     }
 
+    void fallback(pair<int, int>& area, int failedRow, int failedCol) {
+        bool completed = false;
+        for (int k = area.first; k < area.first + rowSpan && !completed; k++) {
+            for (int m = area.second; m < area.second + colSpan && !completed; m++) {
+                if (k == failedRow && m == failedCol) {completed = true; break;}
+                pthread_mutex_unlock(grid[k][m].second);
+            }
+        }
+    }
+
     void checkForTheArea(pair<int, int>& area) {
         bool end = false;
         pair<int, int> lastFailedCoordinates(-1, -1);
@@ -59,28 +72,20 @@ public:
         do {
             if (lastFailedCoordinates.first != -1 && lastFailedCoordinates.second != -1) {
                 pthread_mutex_lock(lastFailedCheck);
+                pthread_mutex_unlock(lastFailedCheck);
+                lastFailedCheck = nullptr;
+                lastFailedCoordinates.first = -1;
+                lastFailedCoordinates.second = -1;
             }
             pthread_mutex_lock(&check);
             end = false;
-            for (int i = area.first, s1 = 0; (i < area.first + rowSpan) && !end; i++, s1++) {
-                for (int j = area.second, s2 = 0; (j < area.second + colSpan) && !end; j++, s2++) {
-                    if (i == lastFailedCoordinates.first && j == lastFailedCoordinates.second) {
-                        lastFailedCheck = nullptr;
-                        lastFailedCoordinates.first = -1;
-                        lastFailedCoordinates.second = -1;
-                        continue;
-                    }
+            for (int i = area.first; (i < area.first + rowSpan) && !end; i++) {
+                for (int j = area.second; (j < area.second + colSpan) && !end; j++) {
                     if (pthread_mutex_trylock(grid[i][j].second) != 0) {
                         lastFailedCheck = grid[i][j].second;
                         lastFailedCoordinates.first = i;
                         lastFailedCoordinates.second = j;
-                        bool end2 = false;
-                        for (int k = area.first; k < area.first + rowSpan && !end2; k++) {
-                            for (int m = area.second; m < area.second + colSpan && !end2; m++) {
-                                if (k == i && m == j) {end2 = true; break;}
-                                pthread_mutex_unlock(grid[k][m].second);
-                            }
-                        }
+                        fallback(area, i, j);
                         end = true;
                     }
                 }
